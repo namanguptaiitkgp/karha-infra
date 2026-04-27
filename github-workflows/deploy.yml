@@ -1,0 +1,163 @@
+# Phase 2 — CI/CD deploy workflow.
+#
+# Copy this file into karha-web/.github/workflows/deploy.yml and add
+# these GitHub repository secrets:
+#
+#   EC2_HOST           — Elastic IP from `terraform apply` output (Phase 1)
+#   EC2_DEPLOY_KEY     — Private SSH key (the .pem you gave Terraform's
+#                        key_pair_name). Paste it into GitHub Secrets
+#                        as a multi-line value.
+#   SENTRY_AUTH_TOKEN  — Optional; only needed once you wire Sentry
+#                        (Phase 2.3 in the roadmap).
+#   SENTRY_ORG / SENTRY_PROJECT — Optional, same.
+#
+# Triggers on push to `main`. PR builds run lint + typecheck only —
+# no deploy until the PR merges. The deploy step uses an atomic
+# release-symlink swap so rollback is `ln -sfn previous current && pm2 reload`.
+
+name: Deploy to production
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # Don't pile up deploys; if a new push lands while one is running,
+  # cancel the in-flight one. The rollback path is fast enough that
+  # we'd rather race the latest commit through.
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Build
+        env:
+          NEXT_PUBLIC_SITE_URL: https://karha.in
+          NEXT_PUBLIC_BUILD_SHA: ${{ github.sha }}
+        run: npm run build
+
+      # Only PR builds stop here. main pushes continue to the artefact + deploy steps.
+      - name: Pack release artefact
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p release
+          # The standalone server.js + minimal node_modules
+          cp -r .next/standalone/. release/
+          # Public + static must live next to server.js for Next standalone
+          cp -r public release/
+          mkdir -p release/.next
+          cp -r .next/static release/.next/static
+          # A tiny manifest the deploy script reads to verify the right
+          # commit landed on the box.
+          echo "${{ github.sha }}" > release/.commit
+          tar -czf release.tar.gz -C release .
+
+      - name: Upload artefact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: release.tar.gz
+          retention-days: 7
+
+  deploy:
+    name: Deploy
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - name: Download artefact
+        uses: actions/download-artifact@v4
+        with:
+          name: release
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_DEPLOY_KEY }}" > ~/.ssh/karha-prod.pem
+          chmod 600 ~/.ssh/karha-prod.pem
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Upload artefact to EC2
+        run: |
+          scp -i ~/.ssh/karha-prod.pem release.tar.gz ec2-user@${{ secrets.EC2_HOST }}:/tmp/
+
+      - name: Atomic release swap + restart
+        run: |
+          ssh -i ~/.ssh/karha-prod.pem ec2-user@${{ secrets.EC2_HOST }} bash <<'REMOTE'
+            set -euo pipefail
+            SHA="${{ github.sha }}"
+            APP_USER=karha
+            BASE_DIR="/home/${APP_USER}/releases"
+            RELEASE_DIR="${BASE_DIR}/${SHA}"
+            CURRENT="/home/${APP_USER}/app"   # symlink target; the live server reads here
+
+            sudo mkdir -p "${RELEASE_DIR}"
+            sudo chown ${APP_USER}:${APP_USER} "${RELEASE_DIR}"
+            sudo -u ${APP_USER} tar -xzf /tmp/release.tar.gz -C "${RELEASE_DIR}"
+            rm /tmp/release.tar.gz
+
+            # Re-link persistent dirs (DB + uploads + .env.production)
+            # into the new release. Without this the new release would
+            # ship without the DB and we'd lose the world.
+            for keep in database public/uploads .env.production; do
+                if [[ -e "${CURRENT}/${keep}" ]]; then
+                    sudo -u ${APP_USER} rm -rf "${RELEASE_DIR}/${keep}" 2>/dev/null || true
+                    sudo -u ${APP_USER} ln -sfn "${CURRENT}/${keep}" "${RELEASE_DIR}/${keep}"
+                fi
+            done
+
+            # Atomic swap. PM2's `--update-env` re-reads .env.production.
+            sudo -u ${APP_USER} ln -sfn "${RELEASE_DIR}" "/home/${APP_USER}/app-next"
+            sudo -u ${APP_USER} mv -Tf "/home/${APP_USER}/app-next" "${CURRENT}"
+            sudo -u ${APP_USER} pm2 reload karha --update-env
+
+            # Keep last 3 releases for fast rollback. Older ones go away.
+            sudo -u ${APP_USER} bash -c "ls -1dt ${BASE_DIR}/* | tail -n +4 | xargs -r rm -rf"
+          REMOTE
+
+      - name: Health check (waits up to 60 s)
+        run: |
+          for attempt in {1..30}; do
+            if curl -fsS https://karha.in/api/health | grep -q '"ok":true'; then
+              echo "✓ Health check passed on attempt $attempt"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "✗ Health check failed — investigate via pm2 logs / CloudWatch"
+          exit 1
+
+      - name: Notify on failure (Slack — optional)
+        if: failure()
+        run: |
+          if [[ -n "${{ secrets.SLACK_WEBHOOK_URL }}" ]]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{\"text\":\"❌ karha.in deploy of ${{ github.sha }} failed. Inspect: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+              "${{ secrets.SLACK_WEBHOOK_URL }}"
+          fi

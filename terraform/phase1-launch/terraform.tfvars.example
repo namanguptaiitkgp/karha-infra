@@ -1,0 +1,13 @@
+# Copy this to terraform.tfvars (gitignored) and fill in the values.
+
+# Your home / office public IPv4 + /32. Find it with `curl ifconfig.me`.
+# DO NOT use 0.0.0.0/0 — that opens SSH to the world.
+ssh_ingress_cidr = "203.0.113.42/32"
+
+# Existing EC2 key pair you control. Generate it manually in the console
+# or with `aws ec2 create-key-pair --key-name karha-prod --output text` and
+# save the .pem locally with `chmod 400`. Terraform only references the name.
+key_pair_name = "karha-prod"
+
+# Email for the CloudWatch billing alarm + Let's Encrypt registration.
+domain_admin_email = "you@example.com"
