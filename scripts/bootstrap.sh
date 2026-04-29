@@ -37,7 +37,7 @@ DOMAIN_PRIMARY="karha.in"
 DOMAIN_WWW="www.karha.in"
 APP_USER="karha"
 APP_DIR="/home/${APP_USER}/app"
-GIT_REPO="https://github.com/namanguptaiitkgp/Karha.git"
+GIT_REPO="git@github.com:namanguptaiitkgp/Karha.git"
 INFRA_REPO="https://github.com/namanguptaiitkgp/karha-infra.git"
 NODE_MAJOR=20
 
