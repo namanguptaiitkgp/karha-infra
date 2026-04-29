@@ -77,16 +77,11 @@ sudo -u "${APP_USER}" git -C "${APP_DIR}" pull
 # Persistent data dirs that survive `git pull`
 sudo -u "${APP_USER}" mkdir -p "${APP_DIR}/database" "${APP_DIR}/public/uploads"
 
-echo "── 6/9 Building the app (uses standalone output) ──────"
-sudo -u "${APP_USER}" bash -c "cd ${APP_DIR} && npm ci && npm run build"
-
-# Standalone output puts server.js at .next/standalone/server.js, but
-# expects public/ and .next/static/ to live next to it. Mirror them.
-sudo -u "${APP_USER}" bash -c "cd ${APP_DIR} && cp -r public .next/standalone/ && cp -r .next/static .next/standalone/.next/"
-
-echo "── 7/9 Loading secrets from Parameter Store ───────────"
-# Pull JWT_SECRET + CRON_SECRET from Parameter Store. The instance
-# profile created by Terraform grants us ssm:GetParametersByPath.
+echo "── 6/9 Loading secrets from Parameter Store ───────────"
+# Pull JWT_SECRET + CRON_SECRET from Parameter Store BEFORE build, because
+# next build runs server modules to collect page data and env.ts throws if
+# JWT_SECRET is missing in production. The instance profile created by
+# Terraform grants us ssm:GetParametersByPath.
 sudo -u "${APP_USER}" bash -c "cat > ${APP_DIR}/.env.production" <<EOF
 NODE_ENV=production
 PORT=3000
@@ -96,6 +91,13 @@ CRON_SECRET=$(aws ssm get-parameter --name /karha/prod/CRON_SECRET --with-decryp
 EOF
 chmod 600 "${APP_DIR}/.env.production"
 chown "${APP_USER}:${APP_USER}" "${APP_DIR}/.env.production"
+
+echo "── 7/9 Building the app (uses standalone output) ──────"
+sudo -u "${APP_USER}" bash -c "cd ${APP_DIR} && npm ci && npm run build"
+
+# Standalone output puts server.js at .next/standalone/server.js, but
+# expects public/ and .next/static/ to live next to it. Mirror them.
+sudo -u "${APP_USER}" bash -c "cd ${APP_DIR} && cp -r public .next/standalone/ && cp -r .next/static .next/standalone/.next/"
 
 echo "── 8/9 Configuring Nginx + Let's Encrypt ──────────────"
 cat > /etc/nginx/conf.d/karha.conf <<'NGINX'
