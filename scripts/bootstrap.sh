@@ -100,6 +100,18 @@ sudo -u "${APP_USER}" bash -c "cd ${APP_DIR} && npm ci && npm run build"
 # expects public/ and .next/static/ to live next to it. Mirror them.
 sudo -u "${APP_USER}" bash -c "cd ${APP_DIR} && cp -r public .next/standalone/ && cp -r .next/static .next/standalone/.next/"
 
+# Runtime-mutable dirs (sqlite DB, user uploads) must be ONE source of
+# truth so admin/maintenance scripts running from ${APP_DIR} edit the
+# same files the live app reads from .next/standalone/. Without this,
+# you end up with two karha.db files and silent data loss (admin updates
+# go to the wrong copy). Replace the build-time copies with symlinks.
+sudo -u "${APP_USER}" bash -c "
+  cd ${APP_DIR}
+  rm -rf .next/standalone/database .next/standalone/public/uploads
+  ln -s ${APP_DIR}/database         .next/standalone/database
+  ln -s ${APP_DIR}/public/uploads   .next/standalone/public/uploads
+"
+
 echo "── 8/9 Configuring Nginx + Let's Encrypt ──────────────"
 cat > /etc/nginx/conf.d/karha.conf <<'NGINX'
 server {
