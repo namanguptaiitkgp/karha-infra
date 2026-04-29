@@ -43,7 +43,8 @@ NODE_MAJOR=20
 
 echo "── 1/9 Installing system packages ─────────────────────"
 dnf update -y
-dnf install -y git make gcc-c++ python3 nginx jq tar gzip
+dnf install -y git make gcc-c++ python3 nginx jq tar gzip cronie
+systemctl enable --now crond
 # awscli v2 ships in AL2023; verify
 aws --version
 
